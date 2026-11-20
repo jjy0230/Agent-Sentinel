@@ -9,6 +9,7 @@ from pathlib import Path
 import click
 from rich.console import Console
 from rich.table import Table
+from sentinel.config.project_config import ProjectConfig, PRESET_CONFIGS
 from sentinel.core.gateway import DualPathGateway
 from sentinel.decision.anyjev_adapter import AnyJevAdapter
 from sentinel.decision.mock_engine import MockDecisionEngine
@@ -16,6 +17,7 @@ from sentinel.interceptors.mcp_proxy import MCPSecurityProxy
 from sentinel.ipc.client import SentinelClient
 from sentinel.ipc.server import SentinelServer
 from sentinel.models import ActionEnum, CommandContext
+from sentinel.snapshot.rollback_engine import RollbackEngine
 
 console = Console()
 
@@ -188,6 +190,75 @@ def configure_cursor() -> None:
     }
     console.print("[bold cyan]To integrate with Cursor, add this to Cursor Settings -> Features -> MCP:[/bold cyan]")
     console.print(json.dumps(cursor_json, indent=2))
+
+
+@main.command()
+@click.option("--preset", type=click.Choice(list(PRESET_CONFIGS.keys())), default="node", help="Ecosystem preset")
+def init(preset: str) -> None:
+    """Initialize a .sentinel.yaml configuration file for the current project."""
+    target_file = Path(".sentinel.yaml")
+    if target_file.exists():
+        console.print(f"[yellow].sentinel.yaml already exists in current directory.[/yellow]")
+        return
+
+    content = ProjectConfig.generate_template(preset=preset)
+    target_file.write_text(content, encoding="utf-8")
+    console.print(f"[bold green]Created .sentinel.yaml with preset '{preset}'[/bold green]")
+
+
+@main.command()
+def undo() -> None:
+    """Revert changes made to the workspace by the last agent command execution."""
+    engine = RollbackEngine()
+    success, msg = engine.undo_last()
+    if success:
+        console.print(f"[bold green]{msg}[/bold green]")
+    else:
+        console.print(f"[bold red]{msg}[/bold red]")
+
+
+@main.command(name="history")
+@click.option("--limit", default=10, help="Number of recent commands to display")
+def view_history(limit: int) -> None:
+    """List recent command execution history and rollback snapshots."""
+    engine = RollbackEngine()
+    entries = engine.list_history(limit=limit)
+
+    if not entries:
+        console.print("[yellow]No command execution history recorded yet.[/yellow]")
+        return
+
+    table = Table(title="Agent-Sentinel Command Execution History", show_header=True)
+    table.add_column("ID", style="dim", width=18)
+    table.add_column("Timestamp", style="cyan", width=19)
+    table.add_column("Agent", width=10)
+    table.add_column("Executed Command", style="bold")
+    table.add_column("Snapshot", style="magenta")
+
+    for e in entries:
+        table.add_row(
+            e.id,
+            e.timestamp,
+            e.agent or "unknown",
+            e.command[:45] + ("..." if len(e.command) > 45 else ""),
+            e.snapshot_ref[:8] if e.snapshot_ref else "none",
+        )
+
+    console.print(table)
+
+
+@main.command(name="dashboard")
+def dashboard() -> None:
+    """Launch interactive real-time terminal dashboard."""
+    from sentinel.tui.dashboard import launch_dashboard
+    launch_dashboard()
+
+
+@main.command(name="tui")
+def tui_cmd() -> None:
+    """Alias for sentinel dashboard."""
+    from sentinel.tui.dashboard import launch_dashboard
+    launch_dashboard()
 
 
 if __name__ == "__main__":

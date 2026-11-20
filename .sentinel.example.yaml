@@ -1,0 +1,24 @@
+# Agent-Sentinel Project Configuration
+# Preset: Python, Data Science & AI Development
+
+preset: python
+auto_trash: true      # Automatically divert dangerous rm to .sentinel/trash/
+auto_snapshot: true    # Take a 3ms shadow git snapshot before mutations
+
+allowed_prefixes:
+  - "python "
+  - "python3 "
+  - "pip "
+  - "uv "
+  - "poetry "
+  - "pytest "
+  - "ruff "
+  - "mypy "
+  - "black "
+
+safe_directories:
+  - "__pycache__"
+  - ".pytest_cache"
+  - ".venv"
+  - "build"
+  - "dist"

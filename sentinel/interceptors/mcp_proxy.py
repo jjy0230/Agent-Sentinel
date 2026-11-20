@@ -1,7 +1,8 @@
 """Model Context Protocol (MCP) Security Proxy.
 
 Integrates seamlessly with Claude Code, Cursor, and Windsurf by exposing an MCP
-server that intercepts terminal/bash execution tools before delegating to the OS.
+server that intercepts terminal/bash execution tools before delegating to the OS,
+with support for soft-delete auto-rewriting and pre-execution snapshots.
 """
 
 import json
@@ -13,6 +14,8 @@ from typing import Any, Dict, List, Optional
 from sentinel.core.gateway import DualPathGateway
 from sentinel.ipc.client import SentinelClient
 from sentinel.models import ActionEnum, CommandContext, EvaluationResult
+from sentinel.rewriter.safe_rewriter import SafeCommandRewriter
+from sentinel.snapshot.rollback_engine import RollbackEngine
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +27,8 @@ class MCPSecurityProxy:
         self.use_daemon = use_daemon
         self.client = SentinelClient() if use_daemon else None
         self.embedded_gateway = DualPathGateway() if not use_daemon else None
+        self.rollback_engine = RollbackEngine()
+        self.rewriter = SafeCommandRewriter()
 
     def evaluate_command(self, cmd: str, intent: Optional[str] = None, workspace: Optional[str] = None) -> EvaluationResult:
         ctx = CommandContext(
@@ -88,7 +93,7 @@ class MCPSecurityProxy:
                                         "properties": {
                                             "command": {"type": "string", "description": "Command to run"},
                                             "intent": {"type": "string", "description": "Goal or rationale for the command"},
-                                            "confirmed": {"type": "boolean", "description": "Set to true only after the user explicitly confirmed ambiguous high-risk operations"}
+                                            "confirmed": {"type": "boolean", "description": "Set to true only after user explicitly confirmed ambiguous operations"}
                                         },
                                         "required": ["command"]
                                     }
@@ -107,10 +112,15 @@ class MCPSecurityProxy:
                         cmd = args.get("command", "")
                         intent = args.get("intent")
                         user_confirmed = bool(args.get("confirmed", False))
+
+                        # Check for safe auto-rewrite first
+                        rewrite_res = self.rewriter.rewrite(cmd)
+                        cmd_to_run = rewrite_res.rewritten_command if rewrite_res.is_rewritten else cmd
+
                         eval_res = self.evaluate_command(cmd, intent=intent)
 
-                        # Hard BLOCK
-                        if eval_res.action == ActionEnum.BLOCK:
+                        # Hard BLOCK (unless safely rewritten to soft-delete)
+                        if eval_res.action == ActionEnum.BLOCK and not rewrite_res.is_rewritten:
                             resp = {
                                 "jsonrpc": "2.0",
                                 "id": req_id,
@@ -134,7 +144,7 @@ class MCPSecurityProxy:
                             continue
 
                         # REQUIRE_HUMAN_CONFIRM
-                        elif eval_res.action == ActionEnum.REQUIRE_HUMAN_CONFIRM:
+                        elif eval_res.action == ActionEnum.REQUIRE_HUMAN_CONFIRM and not rewrite_res.is_rewritten:
                             if not user_confirmed:
                                 resp = {
                                     "jsonrpc": "2.0",
@@ -149,7 +159,7 @@ class MCPSecurityProxy:
                                                     f"Command: {cmd}\n"
                                                     f"Reasons: {', '.join(eval_res.reasons)}\n"
                                                     f"Action Required: You MUST ask the user in chat for explicit permission before proceeding. "
-                                                    f"Once the user approves, re-invoke this tool with confirmed=true."
+                                                    f"Once approved, re-invoke this tool with confirmed=true."
                                                 )
                                             }
                                         ]
@@ -158,16 +168,26 @@ class MCPSecurityProxy:
                                 self._send_response(resp)
                                 continue
 
-                        # ALLOW or Confirmed: Execute command transparently
+                        # ALLOW or Confirmed: Record pre-execution snapshot and execute
                         try:
+                            rewritten_source = cmd if rewrite_res.is_rewritten else None
+                            self.rollback_engine.create_snapshot(
+                                cmd_to_run,
+                                agent="mcp-agent",
+                                rewritten_from=rewritten_source
+                            )
+
                             proc = subprocess.run(
-                                cmd,
+                                cmd_to_run,
                                 shell=True,
                                 capture_output=True,
                                 text=True,
                                 timeout=120,
                             )
                             output = proc.stdout + (("\nSTDERR:\n" + proc.stderr) if proc.stderr else "")
+                            if rewrite_res.is_rewritten:
+                                output = f"[{rewrite_res.reason}]\n" + output
+
                             resp = {
                                 "jsonrpc": "2.0",
                                 "id": req_id,

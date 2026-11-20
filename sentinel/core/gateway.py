@@ -1,12 +1,13 @@
 """Dual-Path Security Gateway Orchestrator.
 
 Combines L1 fast heuristic filter, Symbolic Taint variable resolution,
-and L2 AnyJev/Native calibrated semantic inference to enforce terminal safety
-under a strict 35ms latency ceiling.
+Safe Command Rewriting (Soft-Delete), and L2 AnyJev/Native calibrated semantic inference
+to enforce terminal safety under a strict 35ms latency ceiling.
 """
 
 import time
 from typing import Optional
+from sentinel.config.project_config import ProjectConfig
 from sentinel.core.ast_pruner import ASTPruner
 from sentinel.core.rules_engine import RulesEngine
 from sentinel.core.symbolic_taint import SymbolicTaintAnalyzer
@@ -14,6 +15,7 @@ from sentinel.decision.adaptive_feedback import AdaptiveFeedbackTuner
 from sentinel.decision.base import BaseDecisionEngine
 from sentinel.decision.mock_engine import MockDecisionEngine
 from sentinel.models import ActionEnum, CommandContext, EvaluationResult, RiskLevel, SecurityVerdict
+from sentinel.rewriter.safe_rewriter import SafeCommandRewriter
 
 
 class DualPathGateway:
@@ -26,12 +28,15 @@ class DualPathGateway:
         block_threshold: float = 0.10,
         ast_budget_chars: int = 1200,
         enable_taint_analysis: bool = True,
+        enable_auto_rewrite: bool = True,
     ) -> None:
         self.rules_engine = RulesEngine()
         self.ast_pruner = ASTPruner(token_budget_chars=ast_budget_chars)
         self.taint_analyzer = SymbolicTaintAnalyzer() if enable_taint_analysis else None
         self.decision_engine = decision_engine or MockDecisionEngine()
         self.feedback_tuner = AdaptiveFeedbackTuner()
+        self.project_config = ProjectConfig.load()
+        self.enable_auto_rewrite = enable_auto_rewrite and self.project_config.auto_trash
         self.allow_threshold = allow_threshold
         self.block_threshold = block_threshold
 
@@ -39,12 +44,43 @@ class DualPathGateway:
         """Execute end-to-end multi-tier security inspection."""
         t0 = time.perf_counter_ns()
 
+        # Step 0: Check Project-scoped whitelist prefixes
+        cmd_lower = ctx.raw_command.strip().lower()
+        if any(cmd_lower.startswith(p.lower()) for p in self.project_config.allowed_prefixes):
+            t1 = time.perf_counter_ns()
+            return EvaluationResult(
+                action=ActionEnum.ALLOW,
+                risk_level=RiskLevel.LOW,
+                verdict=SecurityVerdict(p_allow=0.99),
+                reasons=[f"Project Config Whitelist: Matched preset '{self.project_config.preset}'"],
+                latency_ms=round((t1 - t0) / 1_000_000, 3),
+                evaluator_tier="L1_PROJECT_CONFIG",
+                context=ctx,
+            )
+
         # Step 1: L1 Fast-path Filter (< 0.05ms)
         l1_result = self.rules_engine.evaluate(ctx)
         if l1_result is not None:
             t1 = time.perf_counter_ns()
             l1_result.latency_ms = round((t1 - t0) / 1_000_000, 3)
             return l1_result
+
+        # Step 1.5: Smart Auto-Rewrite (Soft-Delete) for local workspace targets
+        sanitized_cmd = None
+        if self.enable_auto_rewrite:
+            rewriter = SafeCommandRewriter(workspace_path=ctx.workspace_path)
+            rewrite_res = rewriter.rewrite(ctx.raw_command)
+            if rewrite_res.is_rewritten:
+                t1 = time.perf_counter_ns()
+                return EvaluationResult(
+                    action=ActionEnum.ALLOW,
+                    risk_level=RiskLevel.LOW,
+                    verdict=SecurityVerdict(p_allow=0.95, is_destructive=False),
+                    reasons=[rewrite_res.reason or "Safely rewritten to soft-delete"],
+                    latency_ms=round((t1 - t0) / 1_000_000, 3),
+                    evaluator_tier="L1_SAFE_REWRITER",
+                    context=ctx,
+                )
 
         # Step 2: Symbolic Taint Analysis & Variable Propagation (< 0.1ms)
         target_command = ctx.raw_command

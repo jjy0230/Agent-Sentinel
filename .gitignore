@@ -45,8 +45,9 @@ coverage.xml
 .pytest_cache/
 cover/
 
-# Environments
-.env
+# Sentinel Runtime & Local Config
+.sentinel/
+.sentinel.yaml
 .venv
 env/
 venv/
