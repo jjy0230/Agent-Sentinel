@@ -1,13 +1,16 @@
 """Dual-Path Security Gateway Orchestrator.
 
-Combines L1 fast heuristic filter and L2 AnyJev calibrated semantic inference
-to enforce terminal safety under a strict 35ms latency ceiling.
+Combines L1 fast heuristic filter, Symbolic Taint variable resolution,
+and L2 AnyJev/Native calibrated semantic inference to enforce terminal safety
+under a strict 35ms latency ceiling.
 """
 
 import time
 from typing import Optional
 from sentinel.core.ast_pruner import ASTPruner
 from sentinel.core.rules_engine import RulesEngine
+from sentinel.core.symbolic_taint import SymbolicTaintAnalyzer
+from sentinel.decision.adaptive_feedback import AdaptiveFeedbackTuner
 from sentinel.decision.base import BaseDecisionEngine
 from sentinel.decision.mock_engine import MockDecisionEngine
 from sentinel.models import ActionEnum, CommandContext, EvaluationResult, RiskLevel, SecurityVerdict
@@ -22,10 +25,13 @@ class DualPathGateway:
         allow_threshold: float = 0.90,
         block_threshold: float = 0.10,
         ast_budget_chars: int = 1200,
+        enable_taint_analysis: bool = True,
     ) -> None:
         self.rules_engine = RulesEngine()
         self.ast_pruner = ASTPruner(token_budget_chars=ast_budget_chars)
+        self.taint_analyzer = SymbolicTaintAnalyzer() if enable_taint_analysis else None
         self.decision_engine = decision_engine or MockDecisionEngine()
+        self.feedback_tuner = AdaptiveFeedbackTuner()
         self.allow_threshold = allow_threshold
         self.block_threshold = block_threshold
 
@@ -40,13 +46,43 @@ class DualPathGateway:
             l1_result.latency_ms = round((t1 - t0) / 1_000_000, 3)
             return l1_result
 
-        # Step 2: AST Pruning & Obfuscation Detection (< 1ms)
-        analysis = self.ast_pruner.analyze(ctx.raw_command)
+        # Step 2: Symbolic Taint Analysis & Variable Propagation (< 0.1ms)
+        target_command = ctx.raw_command
+        taint_warnings = []
+        is_tainted_exfil = False
+        is_tainted_destr = False
 
-        # Step 3: L2 Deep Semantic Evaluation (AnyJev or Mock Engine)
+        if self.taint_analyzer:
+            taint_rep = self.taint_analyzer.analyze(ctx.raw_command)
+            taint_warnings = taint_rep.propagated_warnings
+            is_tainted_exfil = taint_rep.is_tainted_exfiltration
+            is_tainted_destr = taint_rep.is_tainted_destruction
+
+            # Use reconstructed de-obfuscated command for deeper AST inspection
+            if taint_rep.resolved_commands:
+                target_command = " ; ".join(taint_rep.resolved_commands)
+
+        # Step 3: AST Pruning & Obfuscation Detection (< 1ms)
+        analysis = self.ast_pruner.analyze(target_command)
+        analysis.warnings.extend(taint_warnings)
+        if self.taint_analyzer and taint_rep.is_spliced_obfuscation:
+            analysis.is_obfuscated = True
+
+        # Step 4: L2 Deep Semantic Evaluation (AnyJev / Native / Mock Engine)
         verdict = self.decision_engine.evaluate(ctx, analysis)
 
-        # Step 4: Decision Routing & Threshold Logic
+        # Merge Taint violations directly into verdict
+        if is_tainted_exfil:
+            verdict.is_exfiltration = True
+            verdict.p_block = max(verdict.p_block, 0.95)
+            verdict.p_allow = min(verdict.p_allow, 0.01)
+
+        if is_tainted_destr:
+            verdict.is_destructive = True
+            verdict.p_block = max(verdict.p_block, 0.90)
+            verdict.p_allow = min(verdict.p_allow, 0.05)
+
+        # Step 5: Decision Routing & Threshold Logic
         reasons = list(analysis.warnings)
         action: ActionEnum
         risk_level: RiskLevel
@@ -89,3 +125,7 @@ class DualPathGateway:
             evaluator_tier=self.decision_engine.engine_name,
             context=ctx,
         )
+
+    def record_human_approval(self, raw_command: str) -> None:
+        """Incorporate human approval into adaptive prior tuning."""
+        self.feedback_tuner.record_human_approval(raw_command)
