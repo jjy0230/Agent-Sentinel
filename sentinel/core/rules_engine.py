@@ -65,11 +65,14 @@ HARD_BLACKLIST_PATTERNS = [
     (r"dd\s+if=/dev/(?:zero|urandom)\s+of=/dev/[a-z0-9]+", "Raw block device wipe"),
     (r">/dev/sd[a-z0-9]+", "Raw disk redirection destruction"),
     (r"chmod\s+-(?:R|r)\s+777\s+/", "Root privilege degradation"),
+    (r"chown\s+-(?:R|r)\s+[a-z0-9_:]+\s+/", "Root ownership degradation"),
     (r"sudo\s+rm\s+-(?:r[fF]|f[rR]|rf)\s+/", "Privileged filesystem deletion"),
     (r"crontab\s+-r", "Unauthorized cron table deletion"),
     (r">>\s*~?/\.ssh/authorized_keys", "Unauthorized SSH backdoor injection"),
-    (r"nc\s+(?:-e|-c)\s+/bin/(?:ba)?sh", "Netcat reverse shell backdoor"),
+    (r"(?:nc|ncat|netcat)\s+(?:-e|-c)\s+/bin/(?:ba)?sh", "Netcat reverse shell backdoor"),
     (r"bash\s+-i\s+>&?\s*/dev/tcp/", "Direct interactive Bash TCP reverse shell"),
+    (r"iptables\s+-F|ufw\s+disable", "Local firewall flush / disable"),
+    (r"shred\s+.*(?:/etc/|/var/log/)", "Sensitive system log or configuration shredding"),
 ]
 
 # Sensitive patterns that MUST trigger L2 deep evaluation or immediate flag
@@ -77,6 +80,7 @@ SENSITIVE_TARGETS = [
     r"~?/\.ssh/id_[a-z0-9_]+",
     r"~?/\.aws/credentials",
     r"~?/\.config/gcloud/",
+    r"credentials(?:\.db)?",
     r"\.env(?:\.[a-zA-Z0-9]+)?$",
     r"id_rsa",
     r"/etc/shadow",

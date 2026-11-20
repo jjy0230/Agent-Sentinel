@@ -17,7 +17,7 @@ class MockDecisionEngine(BaseDecisionEngine):
     def __init__(self, simulated_latency_ms: float = 0.5) -> None:
         self._simulated_latency = simulated_latency_ms
         self._sensitive_paths_re = re.compile(
-            r"(\.ssh/|id_rsa|\.aws/credentials|\.env|/etc/shadow|/etc/passwd|\.gnupg)",
+            r"(\.ssh/|id_rsa|\.aws/credentials|credentials|\.config/gcloud|\.env|/etc/shadow|/etc/passwd|\.gnupg)",
             re.IGNORECASE,
         )
         self._outbound_net_re = re.compile(
@@ -25,7 +25,7 @@ class MockDecisionEngine(BaseDecisionEngine):
             re.IGNORECASE,
         )
         self._destructive_fs_re = re.compile(
-            r"\b(rm|mv|dd|shred|truncate|mkfs|fdisk)\b|>|>>",
+            r"\b(rm|mv|dd|shred|truncate|mkfs|fdisk|chown|chmod|iptables|ufw)\b|>|>>",
             re.IGNORECASE,
         )
 
@@ -58,8 +58,8 @@ class MockDecisionEngine(BaseDecisionEngine):
             if any(k in pruned for k in ["-rf", "-f", "/dev/", "truncate", ">"]):
                 is_destructive = True
 
-        # Remote execution pipeline detection: curl ... | sh, or sh -c $(curl ...)
-        if has_network and any(sh in pruned for sh in ["| sh", "| bash", "|sh", "|bash", "sh -c", "bash -c"]):
+        # Remote execution pipeline detection: curl ... | sh, wget ... | bash
+        if has_network and any(sh in pruned for sh in ["| sh", "| bash", "|sh", "|bash", "sh -c", "bash -c", "| /bin/bash", "| /bin/sh"]):
             is_destructive = True
 
         # Calculate calibrated probabilities

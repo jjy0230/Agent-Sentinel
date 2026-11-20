@@ -155,5 +155,40 @@ def configure_claude(config_path: str) -> None:
     console.print(f"[bold green]Successfully configured Agent-Sentinel MCP server in: {target}[/bold green]")
 
 
+@main.command()
+@click.option("--shell", type=click.Choice(["bash", "zsh"]), default="bash", help="Target shell")
+def install_hook(shell: str) -> None:
+    """Inject Sentinel preexec hook source into shell RC profile."""
+    rc_file = Path.home() / (".bashrc" if shell == "bash" else ".zshrc")
+    hook_script = Path(__file__).resolve().parent / "interceptors" / "shell_hooks" / f"sentinel.{shell}"
+
+    source_line = f"\n# Added by Agent-Sentinel\n[ -f \"{hook_script}\" ] && source \"{hook_script}\"\n"
+
+    existing = rc_file.read_text(encoding="utf-8") if rc_file.exists() else ""
+    if str(hook_script) in existing:
+        console.print(f"[yellow]Hook is already present in {rc_file}[/yellow]")
+        return
+
+    with open(rc_file, "a", encoding="utf-8") as f:
+        f.write(source_line)
+
+    console.print(f"[bold green]Successfully installed {shell} preexec hook into {rc_file}[/bold green]")
+
+
+@main.command()
+def configure_cursor() -> None:
+    """Output Cursor IDE MCP and Terminal integration settings."""
+    cursor_json = {
+        "mcpServers": {
+            "agent-sentinel": {
+                "command": sys.executable,
+                "args": ["-m", "sentinel.cli", "mcp"]
+            }
+        }
+    }
+    console.print("[bold cyan]To integrate with Cursor, add this to Cursor Settings -> Features -> MCP:[/bold cyan]")
+    console.print(json.dumps(cursor_json, indent=2))
+
+
 if __name__ == "__main__":
     main()
