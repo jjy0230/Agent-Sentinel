@@ -247,6 +247,23 @@ def view_history(limit: int) -> None:
     console.print(table)
 
 
+@main.command(name="report")
+@click.option("--html", is_flag=True, help="Generate interactive HTML report")
+@click.option("--markdown", is_flag=True, help="Print Markdown executive audit summary")
+def generate_report(html: bool, markdown: bool) -> None:
+    """Generate executive audit report in HTML or Markdown."""
+    from sentinel.report.reporter import SentinelReporter
+    reporter = SentinelReporter()
+
+    if markdown or not html:
+        md = reporter.generate_markdown()
+        console.print(md)
+
+    if html:
+        out_path = reporter.generate_html()
+        console.print(f"[bold green]Interactive HTML report generated at: {out_path}[/bold green]")
+
+
 @main.command(name="dashboard")
 def dashboard() -> None:
     """Launch interactive real-time terminal dashboard."""
