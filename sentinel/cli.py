@@ -5,6 +5,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 import click
 from rich.console import Console
 from rich.table import Table
@@ -70,10 +71,13 @@ def check(command_text: str, intent: str, standalone: bool, silent: bool, json_o
         res = gw.evaluate(ctx)
     else:
         client = SentinelClient()
-        res = client.check(ctx)
-        # If client fell back because daemon is not running, and user is in CLI mode, inform user
-        if res.evaluator_tier == "FALLBACK_SAFETY":
-            # Auto-fallback to standalone mock for interactive CLI convenience
+        try:
+            res = client.check(ctx)
+            if res.evaluator_tier == "FALLBACK_SAFETY":
+                gw = DualPathGateway(decision_engine=MockDecisionEngine())
+                res = gw.evaluate(ctx)
+                res.reasons.insert(0, "Note: Daemon not running, evaluated via embedded engine")
+        except ConnectionError:
             gw = DualPathGateway(decision_engine=MockDecisionEngine())
             res = gw.evaluate(ctx)
             res.reasons.insert(0, "Note: Daemon not running, evaluated via embedded engine")
@@ -115,11 +119,40 @@ def mcp(no_daemon: bool) -> None:
 
 
 @main.command()
-@click.option("--iterations", default=1000, help="Number of benchmark iterations")
+@click.option("--iterations", default=500, help="Number of benchmark iterations")
 def bench(iterations: int) -> None:
     """Benchmark end-to-end evaluation latency across L1 and L2 paths."""
     from benchmarks.bench_latency import run_benchmark
     run_benchmark(iterations)
+
+
+@main.command(name="eval")
+def eval_security() -> None:
+    """Evaluate FPR, Recall, and Obfuscation Detection across benchmark datasets."""
+    from benchmarks.eval_security import run_security_eval
+    run_security_eval()
+
+
+@main.command()
+@click.option("--config-path", default=None, help="Path to claude.json (defaults to ~/.claude.json)")
+def configure_claude(config_path: str) -> None:
+    """Automatically register Agent-Sentinel MCP server into Claude Code configuration."""
+    target = Path(config_path) if config_path else (Path.home() / ".claude.json")
+    config_data = {}
+    if target.exists():
+        try:
+            config_data = json.loads(target.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    mcp_servers = config_data.setdefault("mcpServers", {})
+    mcp_servers["agent-sentinel"] = {
+        "command": sys.executable,
+        "args": ["-m", "sentinel.cli", "mcp"],
+    }
+
+    target.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
+    console.print(f"[bold green]Successfully configured Agent-Sentinel MCP server in: {target}[/bold green]")
 
 
 if __name__ == "__main__":

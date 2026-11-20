@@ -37,6 +37,7 @@ class ASTPruner:
         self._re_dynamic_eval = re.compile(r"\b(?:eval|exec)\s+(?:\"|\'|\$)", re.IGNORECASE)
         self._re_env_splicing = re.compile(r"\$\{[A-Za-z0-9_]+:[0-9:]+\}|\$[A-Za-z0-9_]+\$[A-Za-z0-9_]+")
         self._re_tcp_redirect = re.compile(r"/dev/(?:tcp|udp)/[a-zA-Z0-9_.-]+/\d+", re.IGNORECASE)
+        self._re_remote_subshell = re.compile(r"(?:\$\(|`)\s*(?:curl|wget|nc)\b|\b(?:ba)?sh\s+-c\s+[\"'].*?\$\(", re.IGNORECASE)
 
     def analyze(self, raw_script: str) -> PrunedAnalysis:
         """Analyze and prune raw shell script to fit AnyJev prefill budget.
@@ -81,6 +82,10 @@ class ASTPruner:
         if self._re_tcp_redirect.search(full_text):
             is_obfuscated = True
             warnings.append("Detected direct /dev/tcp socket redirection")
+
+        if self._re_remote_subshell.search(full_text):
+            is_obfuscated = True
+            warnings.append("Detected remote payload execution in subshell $(curl/wget)")
 
         # 2. Extract critical command lines
         network_calls: List[str] = []

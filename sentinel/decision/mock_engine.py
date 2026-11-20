@@ -58,6 +58,10 @@ class MockDecisionEngine(BaseDecisionEngine):
             if any(k in pruned for k in ["-rf", "-f", "/dev/", "truncate", ">"]):
                 is_destructive = True
 
+        # Remote execution pipeline detection: curl ... | sh, or sh -c $(curl ...)
+        if has_network and any(sh in pruned for sh in ["| sh", "| bash", "|sh", "|bash", "sh -c", "bash -c"]):
+            is_destructive = True
+
         # Calculate calibrated probabilities
         if is_exfiltration or (is_destructive and is_obfuscated):
             # Definite high-threat attack

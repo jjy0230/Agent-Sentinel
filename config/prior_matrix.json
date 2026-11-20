@@ -1,0 +1,14 @@
+{
+  "model_name": "Qwen/Qwen2.5-Coder-1.5B-Instruct",
+  "options": [
+    "ALLOW",
+    "BLOCK",
+    "REQUIRE_HUMAN_CONFIRM"
+  ],
+  "p0_logits": {
+    "ALLOW": 0.45,
+    "BLOCK": -0.85,
+    "REQUIRE_HUMAN_CONFIRM": -0.15
+  },
+  "alpha": 0.85
+}

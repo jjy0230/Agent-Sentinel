@@ -1,7 +1,7 @@
 """L1 Deterministic Fast-Path Filter.
 
 Evaluates terminal commands in microseconds (< 0.05ms) using pre-compiled regex
-and pattern matching to handle ~80% of deterministic commands (safe queries or obvious attacks)
+and pattern matching to handle ~80-90% of deterministic commands (safe queries or obvious attacks)
 without waking up the neural inference engine.
 """
 
@@ -16,7 +16,8 @@ SAFE_COMMAND_PREFIXES = (
     "git log",
     "git branch",
     "git show",
-    "git remote -v",
+    "git remote",
+    "git rev-parse",
     "ls ",
     "ls -",
     "dir",
@@ -28,19 +29,35 @@ SAFE_COMMAND_PREFIXES = (
     "node --version",
     "npm -v",
     "npm --version",
+    "pnpm -v",
+    "pnpm --version",
+    "yarn -v",
+    "yarn --version",
     "python --version",
     "python -V",
     "python3 --version",
     "python3 -V",
     "cargo --version",
     "cargo check",
+    "cargo build",
     "go version",
     "rustc --version",
+    "docker ps",
+    "docker images",
+    "docker version",
+    "kubectl get ",
+    "kubectl describe ",
+    "pytest ",
     "date",
     "uptime",
+    "ps aux",
+    "ps -ef",
 )
 
-# Hard Blacklist - Unrecoverable destructive attacks (Immediate Block)
+# Safe pipe filter utilities (when chained with safe read commands)
+SAFE_PIPE_FILTERS = {"grep", "head", "tail", "wc", "sort", "uniq", "awk", "cut", "jq", "less", "more"}
+
+# Hard Blacklist - Unrecoverable destructive attacks & immediate compromises
 HARD_BLACKLIST_PATTERNS = [
     (r"rm\s+-(?:r[fF]|f[rR]|rf)\s+(?:/|/\*|~|~/\*|\$HOME|\$HOME/\*)", "Catastrophic filesystem purge"),
     (r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;\s*:", "Fork bomb denial of service"),
@@ -49,6 +66,10 @@ HARD_BLACKLIST_PATTERNS = [
     (r">/dev/sd[a-z0-9]+", "Raw disk redirection destruction"),
     (r"chmod\s+-(?:R|r)\s+777\s+/", "Root privilege degradation"),
     (r"sudo\s+rm\s+-(?:r[fF]|f[rR]|rf)\s+/", "Privileged filesystem deletion"),
+    (r"crontab\s+-r", "Unauthorized cron table deletion"),
+    (r">>\s*~?/\.ssh/authorized_keys", "Unauthorized SSH backdoor injection"),
+    (r"nc\s+(?:-e|-c)\s+/bin/(?:ba)?sh", "Netcat reverse shell backdoor"),
+    (r"bash\s+-i\s+>&?\s*/dev/tcp/", "Direct interactive Bash TCP reverse shell"),
 ]
 
 # Sensitive patterns that MUST trigger L2 deep evaluation or immediate flag
@@ -60,6 +81,7 @@ SENSITIVE_TARGETS = [
     r"id_rsa",
     r"/etc/shadow",
     r"/etc/passwd",
+    r"authorized_keys",
 ]
 
 
@@ -73,6 +95,30 @@ class RulesEngine:
         self._sensitive_target_regexes = [
             re.compile(pat, re.IGNORECASE) for pat in SENSITIVE_TARGETS
         ]
+
+    def _is_safe_read_pipe(self, cmd: str) -> bool:
+        """Check if a pipeline command consists purely of safe read prefixes and safe filters."""
+        segments = [s.strip() for s in cmd.split("|")]
+        if len(segments) <= 1:
+            return False
+
+        first = segments[0].lower()
+        if not any(first == prefix or first.startswith(prefix) for prefix in SAFE_COMMAND_PREFIXES):
+            return False
+
+        # All subsequent pipeline steps must be pure reading/filtering tools
+        for seg in segments[1:]:
+            parts = seg.split()
+            if not parts:
+                return False
+            tool = parts[0].lower()
+            if tool not in SAFE_PIPE_FILTERS:
+                return False
+            # Check for suspicious redirection or shell inside filter
+            if any(c in seg for c in [">", ";", "`", "$("]):
+                return False
+
+        return True
 
     def evaluate(self, ctx: CommandContext) -> Optional[EvaluationResult]:
         """Evaluate command using fast heuristics.
@@ -115,12 +161,28 @@ class RulesEngine:
                 # Contains sensitive credentials -> Never fast-allow, escalate to L2
                 return None
 
-        # 3. Check if command has pipes, network invocations, or subshells
-        # If it does, it's dynamic and must be escalated to L2 for deep inspection
+        # 3. Check for Safe Pipeline (e.g. ps aux | grep node, git log | head -n 5)
+        if "|" in cmd and self._is_safe_read_pipe(cmd):
+            return EvaluationResult(
+                action=ActionEnum.ALLOW,
+                risk_level=RiskLevel.LOW,
+                verdict=SecurityVerdict(
+                    p_allow=0.99,
+                    p_block=0.0,
+                    p_confirm=0.01,
+                    is_destructive=False,
+                    is_exfiltration=False,
+                ),
+                reasons=["L1 Whitelist: Safe read pipeline with benign filter"],
+                evaluator_tier="L1_FAST_RULE",
+                context=ctx,
+            )
+
+        # 4. Check for dynamic execution, network calls or dangerous tokens
         if any(token in cmd for token in ["|", ";", "&&", "||", "`", "$(", "curl", "wget", "nc", "bash -c", "eval"]):
             return None
 
-        # 4. Check Safe Whitelist (Instant ALLOW)
+        # 5. Check Safe Whitelist (Instant ALLOW)
         normalized_cmd = cmd.lower()
         if normalized_cmd == "ls" or any(normalized_cmd.startswith(prefix) for prefix in SAFE_COMMAND_PREFIXES):
             return EvaluationResult(

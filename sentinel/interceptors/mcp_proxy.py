@@ -5,6 +5,7 @@ server that intercepts terminal/bash execution tools before delegating to the OS
 """
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -12,6 +13,8 @@ from typing import Any, Dict, List, Optional
 from sentinel.core.gateway import DualPathGateway
 from sentinel.ipc.client import SentinelClient
 from sentinel.models import ActionEnum, CommandContext, EvaluationResult
+
+logger = logging.getLogger(__name__)
 
 
 class MCPSecurityProxy:
@@ -30,7 +33,13 @@ class MCPSecurityProxy:
             caller_agent="mcp-agent",
         )
         if self.client:
-            return self.client.check(ctx)
+            try:
+                return self.client.check(ctx)
+            except Exception as e:
+                logger.warning("Daemon check failed in MCP proxy (%s), falling back to embedded gateway", e)
+                if not self.embedded_gateway:
+                    self.embedded_gateway = DualPathGateway()
+                return self.embedded_gateway.evaluate(ctx)
         elif self.embedded_gateway:
             return self.embedded_gateway.evaluate(ctx)
         else:
@@ -78,7 +87,8 @@ class MCPSecurityProxy:
                                         "type": "object",
                                         "properties": {
                                             "command": {"type": "string", "description": "Command to run"},
-                                            "intent": {"type": "string", "description": "Goal or rationale for the command"}
+                                            "intent": {"type": "string", "description": "Goal or rationale for the command"},
+                                            "confirmed": {"type": "boolean", "description": "Set to true only after the user explicitly confirmed ambiguous high-risk operations"}
                                         },
                                         "required": ["command"]
                                     }
@@ -93,11 +103,13 @@ class MCPSecurityProxy:
                     tool_name = params.get("name")
                     args = params.get("arguments", {})
 
-                    if tool_name == "bash":
+                    if tool_name in ["bash", "execute_command"]:
                         cmd = args.get("command", "")
                         intent = args.get("intent")
+                        user_confirmed = bool(args.get("confirmed", False))
                         eval_res = self.evaluate_command(cmd, intent=intent)
 
+                        # Hard BLOCK
                         if eval_res.action == ActionEnum.BLOCK:
                             resp = {
                                 "jsonrpc": "2.0",
@@ -108,11 +120,11 @@ class MCPSecurityProxy:
                                         {
                                             "type": "text",
                                             "text": (
-                                                f"AGENT-SENTINEL BLOCKED THIS COMMAND:\n"
+                                                f"[AGENT-SENTINEL SECURITY ALERT] Command execution BLOCKED.\n"
                                                 f"Command: {cmd}\n"
                                                 f"Reasons: {', '.join(eval_res.reasons)}\n"
                                                 f"Risk Level: {eval_res.risk_level.value}\n"
-                                                f"Latency: {eval_res.latency_ms}ms"
+                                                f"Audit Latency: {eval_res.latency_ms} ms"
                                             )
                                         }
                                     ]
@@ -121,29 +133,32 @@ class MCPSecurityProxy:
                             self._send_response(resp)
                             continue
 
+                        # REQUIRE_HUMAN_CONFIRM
                         elif eval_res.action == ActionEnum.REQUIRE_HUMAN_CONFIRM:
-                            # In strict automated MCP, non-interactive confirm fails closed
-                            resp = {
-                                "jsonrpc": "2.0",
-                                "id": req_id,
-                                "result": {
-                                    "isError": True,
-                                    "content": [
-                                        {
-                                            "type": "text",
-                                            "text": (
-                                                f"AGENT-SENTINEL REQUIRE_HUMAN_CONFIRM:\n"
-                                                f"Operation is ambiguous and requires human approval.\n"
-                                                f"Reasons: {', '.join(eval_res.reasons)}"
-                                            )
-                                        }
-                                    ]
+                            if not user_confirmed:
+                                resp = {
+                                    "jsonrpc": "2.0",
+                                    "id": req_id,
+                                    "result": {
+                                        "isError": True,
+                                        "content": [
+                                            {
+                                                "type": "text",
+                                                "text": (
+                                                    f"[AGENT-SENTINEL GUARD] Command execution paused pending human approval.\n"
+                                                    f"Command: {cmd}\n"
+                                                    f"Reasons: {', '.join(eval_res.reasons)}\n"
+                                                    f"Action Required: You MUST ask the user in chat for explicit permission before proceeding. "
+                                                    f"Once the user approves, re-invoke this tool with confirmed=true."
+                                                )
+                                            }
+                                        ]
+                                    }
                                 }
-                            }
-                            self._send_response(resp)
-                            continue
+                                self._send_response(resp)
+                                continue
 
-                        # ALLOW: Execute command transparently
+                        # ALLOW or Confirmed: Execute command transparently
                         try:
                             proc = subprocess.run(
                                 cmd,
@@ -175,7 +190,6 @@ class MCPSecurityProxy:
                         self._send_response(resp)
 
                 else:
-                    # Ignore or acknowledge notifications
                     if req_id is not None:
                         resp = {
                             "jsonrpc": "2.0",

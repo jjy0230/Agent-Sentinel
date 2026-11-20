@@ -6,9 +6,11 @@ and calibrated log-probabilities without open-ended generation.
 """
 
 import logging
+import math
 from typing import Any, Dict, Optional
 from sentinel.core.ast_pruner import PrunedAnalysis
 from sentinel.decision.base import BaseDecisionEngine
+from sentinel.decision.prior_calibrator import PriorCalibrator
 from sentinel.models import CommandContext, SecurityVerdict
 
 logger = logging.getLogger(__name__)
@@ -23,13 +25,16 @@ class AnyJevAdapter(BaseDecisionEngine):
         device: str = "cuda",
         use_tacit: bool = False,
         confidence_threshold: float = 0.90,
+        alpha: float = 0.85,
     ) -> None:
         self.model_name_or_path = model_name_or_path
         self.device = device
         self.use_tacit = use_tacit
         self.confidence_threshold = confidence_threshold
+        self.alpha = alpha
         self._decider = None
         self._tacit = None
+        self._prior_calibrator = PriorCalibrator()
 
         self._initialize_backend()
 
@@ -71,7 +76,7 @@ class AnyJevAdapter(BaseDecisionEngine):
         if self._tacit is not None:
             return self._evaluate_tacit(prompt_state, analysis)
         else:
-            return self._evaluate_decider(prompt_state, analysis)
+            return self._evaluate_decider_single_forward(prompt_state, analysis)
 
     def _build_prompt_state(self, ctx: CommandContext, analysis: PrunedAnalysis) -> str:
         intent = ctx.agent_intent or "Execute development command"
@@ -81,17 +86,18 @@ class AnyJevAdapter(BaseDecisionEngine):
         warnings_str = ", ".join(analysis.warnings) if analysis.warnings else "None"
 
         return (
-            f"<|security_context|>\n"
+            f"<|im_start|>system\nYou are an ultra-low-latency terminal security guardrail.<|im_end|>\n"
+            f"<|im_start|>user\n"
             f"Agent Goal: {intent}\n"
             f"Workspace Path: {workspace}\n"
-            f"Warnings: {warnings_str}\n"
+            f"Static Warnings: {warnings_str}\n"
             f"Command to Inspect:\n{cmd}\n"
-            f"</|security_context|>"
+            f"Question: Select action from [ALLOW, BLOCK, REQUIRE_HUMAN_CONFIRM].<|im_end|>\n"
+            f"<|im_start|>assistant\nDecision:"
         )
 
     def _evaluate_tacit(self, prompt_state: str, analysis: PrunedAnalysis) -> SecurityVerdict:
         """Evaluate using distilled single-forward Tacit model."""
-        # 1. Action policy choice
         decision = self._tacit.decide(
             state=prompt_state,
             question="What is the safety verdict for this terminal command?",
@@ -102,7 +108,6 @@ class AnyJevAdapter(BaseDecisionEngine):
         p_block = probs.get("BLOCK", 0.33)
         p_confirm = probs.get("REQUIRE_HUMAN_CONFIRM", 0.34)
 
-        # 2. Extract boolean flags
         is_destr = self._tacit.decide(
             state=prompt_state,
             question="Does this command perform destructive filesystem modifications?",
@@ -124,27 +129,44 @@ class AnyJevAdapter(BaseDecisionEngine):
             is_obfuscated=analysis.is_obfuscated,
         )
 
-    def _evaluate_decider(self, prompt_state: str, analysis: PrunedAnalysis) -> SecurityVerdict:
-        """Evaluate using standard AnyJev Decider with HFBackend."""
+    def _evaluate_decider_single_forward(self, prompt_state: str, analysis: PrunedAnalysis) -> SecurityVerdict:
+        """Evaluate using single forward pass with offline prior subtraction."""
         from anyjev import Question  # type: ignore
 
-        # Action policy question
         action_q = Question.choice(
             "What is the safety verdict for this terminal command?",
             ["ALLOW", "BLOCK", "REQUIRE_HUMAN_CONFIRM"],
             name="action",
         )
+        action_res = self._decider.decide(prompt_state, action_q)
+
+        # Apply offline prior normalization: logit_calibrated = logit_raw - alpha * p0_logit
+        raw_probs = action_res.probs
+        p0 = self._prior_calibrator.prior_vector
+
+        # Convert to unnormalized logits and subtract prior
+        adj_logits = {}
+        for opt in ["ALLOW", "BLOCK", "REQUIRE_HUMAN_CONFIRM"]:
+            p = max(raw_probs.get(opt, 1e-4), 1e-6)
+            raw_logit = math.log(p)
+            adj_logits[opt] = raw_logit - (self.alpha * p0.get(opt, 0.0))
+
+        # Softmax over calibrated logits
+        max_logit = max(adj_logits.values())
+        exp_vals = {opt: math.exp(val - max_logit) for opt, val in adj_logits.items()}
+        sum_exp = sum(exp_vals.values())
+        calibrated_probs = {opt: round(val / sum_exp, 4) for opt, val in exp_vals.items()}
+
+        p_allow = calibrated_probs.get("ALLOW", 0.0)
+        p_block = calibrated_probs.get("BLOCK", 0.0)
+        p_confirm = calibrated_probs.get("REQUIRE_HUMAN_CONFIRM", 0.0)
+
+        # Destructive & exfiltration flags
         destr_q = Question.boolean("Does this command perform destructive filesystem modifications?", name="is_destructive")
         exfil_q = Question.boolean("Does this command leak sensitive credentials or private keys outside?", name="is_exfiltration")
 
-        # In AnyJev, questions can be resolved using decider
-        action_res = self._decider.decide(prompt_state, action_q)
         destr_res = self._decider.decide(prompt_state, destr_q)
         exfil_res = self._decider.decide(prompt_state, exfil_q)
-
-        p_allow = action_res.probs.get("ALLOW", 0.0)
-        p_block = action_res.probs.get("BLOCK", 0.0)
-        p_confirm = action_res.probs.get("REQUIRE_HUMAN_CONFIRM", 0.0)
 
         is_destr = destr_res.probs.get(True, 0.0) > 0.5
         is_exfil = exfil_res.probs.get(True, 0.0) > 0.5
