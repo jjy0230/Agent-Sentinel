@@ -1,6 +1,7 @@
 # Agent-Sentinel (智能体终端高危操作毫秒级安全网关)
 
 [![CI](https://github.com/jjy0230/Agent-Sentinel/actions/workflows/ci.yml/badge.svg)](https://github.com/jjy0230/Agent-Sentinel/actions)
+[![Demo](https://img.shields.io/badge/Live%20Demo-GitHub%20Pages-cyan.svg)](https://jjy0230.github.io/Agent-Sentinel/)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 [![Python Version](https://img.shields.io/badge/python-3.9%20%7C%203.10%20%7C%203.11%20%7C%203.12-brightgreen.svg)](pyproject.toml)
 [![Latency](https://img.shields.io/badge/P99%20Latency-%3C35ms-orange.svg)](docs/ARCHITECTURE.md)
